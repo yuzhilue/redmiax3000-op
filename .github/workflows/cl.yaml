@@ -1,0 +1,82 @@
+name: Build OpenWrt
+
+on:
+  workflow_dispatch:  # 允许手动触发编译
+  push:
+    branches: [ master ]  # 指定分支有推送时触发编译
+  # schedule:
+  #   - cron: '0 2 * * 1'  # 可选：设置定时编译，例如每周一凌晨2点
+
+env: # 设置一些环境变量，方便管理和修改
+  REPO_URL: https://github.com/immortalwrt/immortalwrt  # 使用的OpenWrt源码仓库
+  REPO_BRANCH: master  # 使用的源码分支
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04  # 使用较新的Ubuntu系统镜像
+
+    steps:
+    # 步骤1：检出你的仓库代码，以便工作流能访问到你的配置文件
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # 步骤2：安装必要的系统依赖包
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        bzip2 ccache cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib g++-multilib \
+        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+        libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+        mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply \
+        python3-docutils qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl \
+        unzip vim wget xmlto xxd zlib1g-dev
+
+    # 步骤3：克隆OpenWrt源码
+    - name: Clone OpenWrt source
+      run: |
+        git clone $REPO_URL --branch $REPO_BRANCH --depth 1 openwrt
+        ls -al
+
+    # 步骤4：更新和安装feeds（软件包列表）
+    - name: Update and install feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    # 步骤5：应用你的自定义配置
+    # 你可以将编译配置直接写入 .config 文件
+    - name: Apply configuration
+      run: |
+        cd openwrt
+        cat > .config <<EOF
+         CONFIG_TARGET_qualcommax=y
+         CONFIG_TARGET_qualcommax_ipq50xx=y
+
+          CONFIG_IB=y
+          # CONFIG_IB_STANDALONE is not set
+          CONFIG_SDK=y
+          CONFIG_MAKE_TOOLCHAIN=y
+
+          CONFIG_ALL_NONSHARED=y
+          CONFIG_REPRODUCIBLE_DEBUG_INFO=y
+
+          CONFIG_PACKAGE_luci=y
+        # 更多配置...
+        EOF
+        make defconfig
+
+    # 步骤6：开始编译（此步骤非常耗时）
+    - name: Start building
+      run: |
+        cd openwrt
+        make -j$(nproc)  # 使用所有可用的CPU核心进行编译
+
+    # 步骤7：上传编译好的固件作为工作流制品，便于下载
+    - name: Upload firmware
+      uses: actions/upload-artifact@v4
+      with:
+        name: openwrt_firmware
+        path: openwrt/bin/targets/*/*
+        retention-days: 7  # 制品保留天数
