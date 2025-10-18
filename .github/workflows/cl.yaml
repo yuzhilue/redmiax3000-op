@@ -8,8 +8,8 @@ on:
   #   - cron: '0 2 * * 1'  # 可选：设置定时编译，例如每周一凌晨2点
 
 env: # 设置一些环境变量，方便管理和修改
-  REPO_URL: https://github.com/immortalwrt/immortalwrt  # 使用的OpenWrt源码仓库
-  REPO_BRANCH: master  # 使用的源码分支
+  REPO_URL: https://github.com/eritpchy/immortalwrt-redmi-ax3000  # 使用的OpenWrt源码仓库
+  REPO_BRANCH: redmi_ax3000-24.10  # 使用的源码分支
 
 jobs:
   build:
@@ -67,16 +67,144 @@ jobs:
         EOF
         make defconfig
 
+
+    - name: Download dependencies
+      runn: |
+        cd openwrt
+        make -j16 download
+
+    - name: Build tools
+      run: |
+        make -j$(nproc) tools/install
+
+    - name: Build toolchain
+      run: |
+          make -j$(nproc) toolchain/install
+
+
     # 步骤6：开始编译（此步骤非常耗时）
     - name: Start building
       run: |
         cd openwrt
-        make -j$(nproc)  # 使用所有可用的CPU核心进行编译
-
-    # 步骤7：上传编译好的固件作为工作流制品，便于下载
-    - name: Upload firmware
-      uses: actions/upload-artifact@v4
+        make -j$(nproc) IGNORE_ERRORS=1
+    - name: Upload bin to artifacts
+      uses: actions/upload-artifact@v3
       with:
-        name: openwrt_firmware
-        path: openwrt/bin/targets/*/*
-        retention-days: 7  # 制品保留天数
+          name: bin-qualcommax-ipq50xx
+          path: bin/targets/qualcommax/ipq50xx/*
+
+    - name: Upload dl to artifacts
+      uses: actions/upload-artifact@v3
+      with:
+          name: dl
+          path: dl/*
+      
+  gh-pages:
+    needs: [ build ]
+    runs-on: ubuntu-20.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout gh-pages
+        uses: actions/checkout@v3
+        with:
+          path: 'gh-pages'
+          ref: 'gh-pages'
+          fetch-depth: 0
+
+      - name: Configure the git user
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Drop old versions
+        run: |
+          cd gh-pages
+          readarray -t old_version < <(git log --format='%h' -- "${GITHUB_REF_NAME}" | tail -n +10)
+          GIT_SEQUENCE_EDITOR="sed -i '1 i break'" git rebase --interactive --committer-date-is-author-date --root
+          for commit in "${old_version[@]}"; do
+            sed -i "/${commit}/d" .git/rebase-merge/git-rebase-todo
+          done
+          git rebase --continue
+
+      - name: Download bin from artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: bin-qualcommax-ipq50xx
+          path: bin/
+
+      - name: Copy contents
+        run: |
+          version="$(cat "bin/version.buildinfo")"
+          mkdir -p "gh-pages/${GITHUB_REF_NAME}/${version}/"
+          cp -avr bin/packages/* "gh-pages/${GITHUB_REF_NAME}/${version}/"
+
+      - name: Commit
+        run: |
+          cd gh-pages
+          git add .
+          git commit -m "Add: ${GITHUB_REF_NAME}: $(cat ../bin/version.buildinfo)"
+
+      - name: Publish
+        run: |
+          cd gh-pages
+          git push -f origin gh-pages
+
+
+release:
+    needs: [ build ]
+    runs-on: ubuntu-20.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Download dl from artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: dl
+          path: dl/
+
+      - name: Download bin from artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: bin-qualcommax-ipq50xx
+          path: bin/targets/qualcommax/ipq50xx/
+
+      - name: Generate release informations
+        run: |
+          TIME="$(curl "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" | jq -r .created_at)"
+
+          TAG="ci-${GITHUB_REF_NAME}-$(date -d "${TIME}" -u +'%Y%m%d-%H%M%S-%Z')"
+          echo "TAG=$TAG" >>$GITHUB_ENV
+
+          cat <<EOF | sed -E 's/^  //' >Release.md
+            CI ${GITHUB_REF_NAME} $(date -d "${TIME}" -u +'%Y-%m-%d %H:%M:%S %Z(%:z)')
+
+            # ${GITHUB_REF_NAME}
+
+            Build time: \`$(date -d "${TIME}" -u +'%Y-%m-%d %H:%M:%S %Z(%:z)')\`
+            Release version: ${TAG}
+
+            ## Sources
+            $(cat bin/targets/qualcommax/ipq50xx/feeds.buildinfo | awk -F'[ ^]' '{printf "%s: `%s`\n", $2, $4}')
+
+            ## SHA256
+            $(cat bin/targets/qualcommax/ipq50xx/sha256sums | awk '{printf "%s: `%s`\n", $2, $1}' | sed -E 's/^\*//')
+          EOF
+
+          echo "NAME=$(head --line=1 Release.md)" >>$GITHUB_ENV
+          tail --line=+2 Release.md >Body.md
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ env.NAME }}
+          body_path: Body.md
+          files: |
+            bin/targets/qualcommax/ipq50xx/sha256sums
+            bin/targets/qualcommax/ipq50xx/*.*
